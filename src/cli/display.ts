@@ -5,7 +5,7 @@
  *
  *  Licensed under the MIT License. See LICENSE in the repository root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { Canvas, createCanvas } from "canvas";
+import { Canvas, ImageData, createCanvas } from "canvas";
 import chalk from "chalk";
 
 const ASCII_ALPHABET = ["@", "%", "#", "*", "+", "=", "-", ":", ".", " "];
@@ -55,6 +55,19 @@ export function deriveMaxColumns() {
     const fallback = widthLimit || heightLimit || 0;
     const derived = boundedColumns || fallback;
     return derived > 0 ? Math.max(derived, MIN_COLUMNS) : FALLBACK_COLUMNS;
+}
+
+/**
+ * Encodes a rendered frame (ImageData posted by the engine display) as a PNG buffer.
+ * Used by the CLI `--screenshot` capture path for headless visual verification.
+ * @param frame - The ImageData frame received from the engine
+ * @returns PNG-encoded buffer of the frame
+ */
+export function frameToPngBuffer(frame: ImageData): Buffer {
+    const canvas = createCanvas(frame.width, frame.height);
+    const ctx = canvas.getContext("2d");
+    ctx.putImageData(frame, 0, 0);
+    return canvas.toBuffer("image/png");
 }
 
 /**

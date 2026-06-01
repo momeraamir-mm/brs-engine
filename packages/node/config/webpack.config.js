@@ -116,6 +116,34 @@ module.exports = (env) => {
             },
         },
         {
+            name: "task",
+            entry: "../../src/cli/task-worker.ts",
+            target: "node",
+            mode: mode,
+            devtool: sourceMap,
+            module: {
+                rules: [
+                    {
+                        test: /\.tsx?$/,
+                        use: tsLoaders("./tsconfig.cli.json"),
+                        exclude: /node_modules/,
+                    },
+                ],
+            },
+            resolve: {
+                ...sharedResolve,
+                extensions: [".tsx", ".ts", ".js", ".mjs"],
+            },
+            externals: {
+                "./brs.node.js": "commonjs ./brs.node.js",
+                "brs-engine": "commonjs ./brs.node.js",
+            },
+            output: {
+                filename: libName + ".task.js",
+                path: path.resolve(__dirname, cliPath),
+            },
+        },
+        {
             name: "ecp",
             entry: "../../src/cli/ecp.ts",
             target: "node",
@@ -153,7 +181,12 @@ module.exports = (env) => {
             },
             plugins: [
                 new CopyPlugin({
-                    patterns: [{ from: "../../src/core/common/**", to: "./" }],
+                    patterns: [
+                        { from: "../../src/core/common/**", to: "./" },
+                        // SceneGraph extension common assets (system-fonts.json, Metropolis
+                        // fonts, SG system images) so the CLI's common: volume serves them.
+                        { from: "../../src/extensions/scenegraph/common/**", to: "./" },
+                    ],
                 }),
                 new ZipPlugin({
                     path: "../../packages/node/assets",
@@ -164,7 +197,9 @@ module.exports = (env) => {
                     },
                     exclude: [/\.csv$/],
                     pathMapper: function (assetPath) {
-                        return assetPath.replace("../../src/core/common/", "");
+                        return assetPath
+                            .replace("../../src/core/common/", "")
+                            .replace("../../src/extensions/scenegraph/common/", "");
                     },
                 }),
             ],

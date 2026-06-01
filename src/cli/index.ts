@@ -19,7 +19,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import stripAnsi from "strip-ansi";
 import { deviceData, loadAppZip, updateAppZip, subscribePackage, mountExt, setupDeepLink } from "./package";
-import { deriveMaxColumns, renderAsciiFrame, renderUnicodeFrame, printFrame } from "./display";
+import { deriveMaxColumns, renderAsciiFrame, renderUnicodeFrame, printFrame, frameToPngBuffer } from "./display";
 import { isNumber } from "../api/util";
 import {
     DebugPrompt,
@@ -30,6 +30,9 @@ import {
     AppData,
     SupportedExtension,
     isRegistryData,
+    isTaskData,
+    TaskState,
+    TaskPayload,
     ExtensionInfo,
     DataType,
     ExtVolInitialSize,
@@ -52,6 +55,9 @@ const BrsDevice = brs.BrsDevice;
 
 // Variables
 let appFileName = "";
+let lastScreenshotMs = 0;
+let currentPayload: AppPayload;
+const taskWorkers = new Map<number, Worker>();
 const extensions: ExtensionInfo[] = [];
 let brsWorker: Worker;
 let workerReady = false;
@@ -68,6 +74,7 @@ program
     .arguments(`brs-cli [brsFiles...]`)
     .option("-a, --ascii <columns>", "Enable ASCII screen mode with # of columns.")
     .option("-u, --unicode", "Render ASCII screen mode using Unicode block characters.", false)
+    .option("-s, --screenshot <file>", "Continuously write the latest rendered frame as a PNG to <file> (headless capture).")
     .option("-c, --colors <level>", "Define the console color level (0 to disable).", defaultLevel)
     .option("-d, --debug", "Open the micro debugger if the app crashes.", false)
     .option("-e, --ecp", "Enable the ECP server for control simulation.", false)
@@ -262,6 +269,7 @@ function displayTitle() {
  */
 async function runApp(payload: AppPayload) {
     payload.password = program.pack;
+    currentPayload = payload;
     if (program.ecp && !workerReady) {
         // Load ECP service as Worker
         const workerPath = path.join(__dirname, "brs.ecp.js");
@@ -532,21 +540,78 @@ function packageCallback(event: string, data: any) {
  * @param message - The message from interpreter (string, ImageData, or Map)
  * @param _ - Unused parameter
  */
+/**
+ * Writes the latest rendered frame to a PNG file for headless visual capture.
+ * Throttled to at most once per 250ms to avoid excessive disk I/O at render cadence.
+ * @param frame - The ImageData frame received from the engine
+ * @param file - Destination PNG path (from the --screenshot option)
+ */
+function saveScreenshot(frame: ImageData, file: string) {
+    const now = Date.now();
+    if (now - lastScreenshotMs < 250) {
+        return;
+    }
+    lastScreenshotMs = now;
+    try {
+        fs.writeFileSync(file, frameToPngBuffer(frame));
+    } catch (err: any) {
+        console.error(chalk.red(`[screenshot] write failed: ${err.message}`));
+    }
+}
+
+/**
+ * Spawns/stops a Node worker_thread to run a SceneGraph Task's function.
+ * Mirrors the browser api/task.ts runTask(), using worker_threads for the CLI.
+ * @param taskData Task metadata posted by the engine when control becomes run/stop.
+ */
+function handleTaskData(taskData: any) {
+    console.error(`[cli-task] handleTaskData id=${taskData.id} name=${taskData.name} state=${taskData.state} hasPayload=${!!currentPayload}`);
+    if (taskData.state === TaskState.RUN) {
+        if (taskWorkers.has(taskData.id) || !currentPayload) {
+            return;
+        }
+        const worker = new Worker(path.join(__dirname, "brs.task.js"));
+        taskWorkers.set(taskData.id, worker);
+        worker.on("message", (msg: any) => messageCallback(msg));
+        worker.on("error", (err: any) => console.error(chalk.red(`[task] worker error: ${err.message}`)));
+        const taskPayload: TaskPayload = {
+            device: currentPayload.device,
+            manifest: currentPayload.manifest,
+            taskData: taskData,
+            paths: currentPayload.paths,
+            pkgZip: currentPayload.pkgZip,
+            extZip: currentPayload.extZip,
+        };
+        worker.postMessage(sharedBuffer);
+        worker.postMessage(taskPayload);
+    } else if (taskData.state === TaskState.STOP) {
+        taskWorkers.get(taskData.id)?.terminate();
+        taskWorkers.delete(taskData.id);
+    }
+}
+
 function messageCallback(message: any, _?: any) {
     if (typeof message === "string") {
         handleStringMessage(message);
-    } else if (program.ascii && message instanceof ImageData) {
-        const canvas = createCanvas(message.width, message.height);
-        const ctx = canvas.getContext("2d");
-        canvas.width = message.width;
-        canvas.height = message.height;
-        ctx.putImageData(message, 0, 0);
-        const columns = typeof program.ascii === "number" && program.ascii > 0 ? program.ascii : maxColumns;
-        if (program.unicode) {
-            printFrame(renderUnicodeFrame(columns, canvas));
-        } else {
-            printFrame(renderAsciiFrame(columns, canvas));
+    } else if (message instanceof ImageData) {
+        if (program.screenshot) {
+            saveScreenshot(message, program.screenshot);
         }
+        if (program.ascii) {
+            const canvas = createCanvas(message.width, message.height);
+            const ctx = canvas.getContext("2d");
+            canvas.width = message.width;
+            canvas.height = message.height;
+            ctx.putImageData(message, 0, 0);
+            const columns = typeof program.ascii === "number" && program.ascii > 0 ? program.ascii : maxColumns;
+            if (program.unicode) {
+                printFrame(renderUnicodeFrame(columns, canvas));
+            } else {
+                printFrame(renderAsciiFrame(columns, canvas));
+            }
+        }
+    } else if (isTaskData(message)) {
+        handleTaskData(message);
     } else if (isRegistryData(message)) {
         if (program.ecp) {
             brsWorker?.postMessage(message.current);

@@ -263,12 +263,16 @@ export function addSound(path: string, format: string, data: any) {
  * @param url Optional URL to load from
  * @returns Created Howl sound object
  */
-function registerSound(path: string, preload: boolean, format?: string, url?: string) {
+function registerSound(path: string, preload: boolean, format?: string, url?: string, html5: boolean = false) {
     soundsIdx.set(path.toLowerCase(), soundsDat.length);
     let sound = new Howl({
         src: [url ?? path],
         format: format,
         preload: preload,
+        // Long-form streamed audio (audiobooks/podcasts) must use the HTML5
+        // audio element so playback starts after a small buffer instead of
+        // Web Audio's full download+decode of the whole file before first play.
+        html5: html5,
         onloaderror: function (id, message) {
             Atomics.store(sharedArray, DataType.SND, MediaEvent.Failed);
             notifyAll("warning", `[sound] Error loading sound ${id} ${path}: ${message}`);
@@ -369,7 +373,7 @@ function playAudio() {
         if (idx !== undefined && idx >= 0 && idx < soundsDat.length) {
             sound = soundsDat[idx];
         } else if (audio.startsWith("http")) {
-            sound = registerSound(audio, true);
+            sound = registerSound(audio, true, undefined, undefined, true);
         } else {
             notifyAll("warning", `[sound] Can't find audio to play: ${audio}`);
             return;
