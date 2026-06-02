@@ -1,3 +1,8 @@
+> **Working in the AudioShelf automation fork?** Read
+> [`ENGINEERING_STANDARDS.md`](./ENGINEERING_STANDARDS.md) first — it defines the fork-specific bar
+> (the "never more permissive than a real Roku" fidelity rule, minimal-diff discipline, and
+> mandatory regression tests). The guidance below is the upstream project's general contribution etiquette.
+
 # Contributions Welcome
 
 Any contributions you're willing to make are _super_ appreciated. That includes a wide variety of things &ndash; not just code!
