@@ -116,6 +116,34 @@ module.exports = (env) => {
             },
         },
         {
+            name: "app",
+            entry: "../../src/cli/app-worker.ts",
+            target: "node",
+            mode: mode,
+            devtool: sourceMap,
+            module: {
+                rules: [
+                    {
+                        test: /\.tsx?$/,
+                        use: tsLoaders("./tsconfig.cli.json"),
+                        exclude: /node_modules/,
+                    },
+                ],
+            },
+            resolve: {
+                ...sharedResolve,
+                extensions: [".tsx", ".ts", ".js", ".mjs"],
+            },
+            externals: {
+                "./brs.node.js": "commonjs ./brs.node.js",
+                "brs-engine": "commonjs ./brs.node.js",
+            },
+            output: {
+                filename: libName + ".app.js",
+                path: path.resolve(__dirname, cliPath),
+            },
+        },
+        {
             name: "task",
             entry: "../../src/cli/task-worker.ts",
             target: "node",

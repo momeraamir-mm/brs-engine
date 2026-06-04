@@ -22,33 +22,27 @@ declare const __non_webpack_require__: NodeJS.Require;
 const loadModule = typeof __non_webpack_require__ === "function" ? __non_webpack_require__ : eval("require");
 
 if (parentPort) {
-    process.stderr.write("[taskw] booted\n");
+    const port = parentPort;
     // Route the engine's outbound messages to the parent (main) thread.
-    globalThis.postMessage = (message: any) => parentPort!.postMessage(message);
+    globalThis.postMessage = (message: any) => port.postMessage(message);
 
     // Load the SceneGraph extension in this worker (Node require, mirrors loadSceneGraphExtension).
     try {
         const sg = loadModule(path.join(__dirname, "brs-sg.node.js"));
         brs.registerExtension(() => new sg.BrightScriptExtension());
-        process.stderr.write("[taskw] SceneGraph extension registered\n");
     } catch (err: any) {
-        process.stderr.write(`[taskw] Failed to load SceneGraph extension: ${err.message}\n`);
+        port.postMessage(`warning,[task-worker] Failed to load SceneGraph extension: ${err.message}`);
     }
 
-    parentPort.on("message", (data: any) => {
+    port.on("message", (data: any) => {
         if (data instanceof SharedArrayBuffer) {
             brs.BrsDevice.setSharedArray(new Int32Array(data));
-            process.stderr.write("[taskw] shared array set\n");
         } else if (isTaskPayload(data)) {
-            process.stderr.write(`[taskw] executing task ${data.taskData.name}\n`);
             try {
                 brs.executeTask(data);
-                process.stderr.write("[taskw] executeTask returned\n");
             } catch (err: any) {
-                process.stderr.write(`[taskw] executeTask threw: ${err.message}\n`);
+                port.postMessage(`error,[task-worker] executeTask failed: ${err.message}`);
             }
-        } else {
-            process.stderr.write(`[taskw] unexpected message: ${typeof data}\n`);
         }
     });
 }

@@ -31,8 +31,12 @@ import {
     SupportedExtension,
     isRegistryData,
     isTaskData,
+    isThreadUpdate,
+    MediaEvent,
+    TaskData,
     TaskState,
     TaskPayload,
+    ThreadUpdate,
     ExtensionInfo,
     DataType,
     ExtVolInitialSize,
@@ -57,9 +61,17 @@ const BrsDevice = brs.BrsDevice;
 let appFileName = "";
 let lastScreenshotMs = 0;
 let currentPayload: AppPayload;
+const MAX_TASKS = 10;
 const taskWorkers = new Map<number, Worker>();
+// SharedObject rendezvous channels bridging the engine worker and each Task worker.
+// A worker blocked in a synchronous field rendezvous (Atomics.wait) cannot receive
+// postMessage, so the main thread relays updates by writing into the SharedObject the
+// target worker is waiting on (mirrors the browser api/task.ts relay).
+const threadSyncToTask = new Map<number, SharedObject>();
+const threadSyncToMain = new Map<number, SharedObject>();
 const extensions: ExtensionInfo[] = [];
 let brsWorker: Worker;
+let appWorker: Worker;
 let workerReady = false;
 let sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * length);
 let sharedArray = new Int32Array(sharedBuffer);
@@ -270,7 +282,8 @@ function displayTitle() {
 async function runApp(payload: AppPayload) {
     payload.password = program.pack;
     currentPayload = payload;
-    if (program.ecp && !workerReady) {
+    const packaging = program.pack.length > 0;
+    if (program.ecp && !workerReady && !packaging) {
         // Load ECP service as Worker
         const workerPath = path.join(__dirname, "brs.ecp.js");
         const workerData = { device: payload.device };
@@ -289,11 +302,29 @@ async function runApp(payload: AppPayload) {
         brsWorker.postMessage(sharedBuffer);
         return;
     }
+    if (!packaging) {
+        // Run the engine on its own worker thread (mirrors the browser model) so the CLI
+        // main thread stays free to spawn SceneGraph Task workers on demand. Running the
+        // engine on the main thread starves the event loop (infinite render loop) and Task
+        // workers never boot. The app's exit is reported back via an { appExit } message.
+        try {
+            const worker = new Worker(path.join(__dirname, "brs.app.js"));
+            appWorker = worker;
+            worker.on("message", (msg: any) => messageCallback(msg));
+            worker.on("error", (err: any) => {
+                console.error(chalk.red(`Error executing app: ${err.message}`));
+                process.exitCode = 1;
+            });
+            worker.postMessage(sharedBuffer);
+            worker.postMessage(payload);
+        } catch (err: any) {
+            console.error(chalk.red(`Error executing app: ${err.message}`));
+            process.exitCode = 1;
+        }
+        return;
+    }
     try {
         const pkg = await brs.executeFile(payload, {}, true);
-        if (program.ecp) {
-            brsWorker?.terminate();
-        }
         if (pkg.exitReason === AppExitReason.Packaged) {
             // Generate the Encrypted App Package
             const filePath = path.join(program.out, appFileName.replaceAll(/.zip/gi, ".bpk"));
@@ -560,33 +591,119 @@ function saveScreenshot(frame: ImageData, file: string) {
 }
 
 /**
- * Spawns/stops a Node worker_thread to run a SceneGraph Task's function.
- * Mirrors the browser api/task.ts runTask(), using worker_threads for the CLI.
+ * Starts or stops a SceneGraph Task on its own Node worker_thread in response to a
+ * TaskData message from the engine worker. Mirrors the browser api/task.ts handleTaskData().
  * @param taskData Task metadata posted by the engine when control becomes run/stop.
  */
-function handleTaskData(taskData: any) {
-    console.error(`[cli-task] handleTaskData id=${taskData.id} name=${taskData.name} state=${taskData.state} hasPayload=${!!currentPayload}`);
+function handleTaskData(taskData: TaskData) {
     if (taskData.state === TaskState.RUN) {
-        if (taskWorkers.has(taskData.id) || !currentPayload) {
-            return;
+        if (taskData.buffer instanceof SharedArrayBuffer) {
+            // The engine created this "to-main" channel; wrap it so the main thread can
+            // deliver task-originated field updates to the engine worker waiting on it.
+            const taskBuffer = new SharedObject();
+            taskBuffer.setBuffer(taskData.buffer);
+            threadSyncToMain.set(taskData.id, taskBuffer);
         }
-        const worker = new Worker(path.join(__dirname, "brs.task.js"));
-        taskWorkers.set(taskData.id, worker);
-        worker.on("message", (msg: any) => messageCallback(msg));
-        worker.on("error", (err: any) => console.error(chalk.red(`[task] worker error: ${err.message}`)));
-        const taskPayload: TaskPayload = {
-            device: currentPayload.device,
-            manifest: currentPayload.manifest,
-            taskData: taskData,
-            paths: currentPayload.paths,
-            pkgZip: currentPayload.pkgZip,
-            extZip: currentPayload.extZip,
-        };
-        worker.postMessage(sharedBuffer);
-        worker.postMessage(taskPayload);
+        runTask(taskData);
     } else if (taskData.state === TaskState.STOP) {
-        taskWorkers.get(taskData.id)?.terminate();
-        taskWorkers.delete(taskData.id);
+        endTask(taskData.id);
+    }
+}
+
+/**
+ * Spawns a Node worker_thread to run a Task's function, wiring its "to-task" rendezvous
+ * channel. Mirrors the browser api/task.ts runTask().
+ * @param taskData Task configuration (carries the function name and sync buffer).
+ */
+function runTask(taskData: TaskData) {
+    if (taskWorkers.has(taskData.id) || !taskData.m?.top?.functionname || !currentPayload) {
+        return;
+    } else if (taskWorkers.size >= MAX_TASKS) {
+        console.warn(chalk.yellow(`[task] Maximum number of tasks reached: ${taskWorkers.size}`));
+        return;
+    }
+    const worker = new Worker(path.join(__dirname, "brs.task.js"));
+    worker.on("message", (msg: any) => taskCallback(msg));
+    worker.on("error", (err: any) => console.error(chalk.red(`[task] worker error: ${err.message}`)));
+    taskWorkers.set(taskData.id, worker);
+    if (!threadSyncToTask.has(taskData.id)) {
+        threadSyncToTask.set(taskData.id, new SharedObject());
+    }
+    taskData.buffer = threadSyncToTask.get(taskData.id)?.getBuffer();
+    const taskPayload: TaskPayload = {
+        device: currentPayload.device,
+        manifest: currentPayload.manifest,
+        taskData: taskData,
+        extensions: currentPayload.extensions,
+        paths: currentPayload.paths,
+        pkgZip: currentPayload.pkgZip,
+        extZip: currentPayload.extZip,
+    };
+    worker.postMessage(sharedBuffer);
+    worker.postMessage(taskPayload);
+}
+
+/**
+ * Terminates a running Task worker and clears its rendezvous channels.
+ * @param taskId Id of the Task to terminate.
+ */
+function endTask(taskId: number) {
+    const worker = taskWorkers.get(taskId);
+    if (worker) {
+        worker.terminate();
+        taskWorkers.delete(taskId);
+        threadSyncToTask.delete(taskId);
+        threadSyncToMain.delete(taskId);
+    }
+}
+
+/**
+ * Relays a field-sync ThreadUpdate between the engine worker and Task workers by writing it
+ * into the SharedObject the target worker is blocked on. Mirrors browser api/task.ts.
+ * @param threadUpdate The field update to relay.
+ * @param fromTask True when the update originated from a Task worker (vs the engine worker).
+ */
+function handleThreadUpdate(threadUpdate: ThreadUpdate, fromTask: boolean = false) {
+    if (fromTask) {
+        threadSyncToMain.get(threadUpdate.id)?.waitStore(threadUpdate, 1);
+    }
+    if (threadUpdate.id > 0 && !fromTask) {
+        updateTask(threadUpdate.id, threadUpdate);
+    } else if (threadUpdate.type !== "task") {
+        // Propagate to other tasks
+        for (const taskId of taskWorkers.keys()) {
+            if (!fromTask || (taskId !== threadUpdate.id && threadUpdate.action === "set")) {
+                updateTask(taskId, threadUpdate);
+            }
+        }
+    }
+}
+
+/**
+ * Writes a ThreadUpdate into a Task's "to-task" rendezvous channel.
+ * @param targetId Id of the target Task worker.
+ * @param data The field update to deliver.
+ */
+function updateTask(targetId: number, data: ThreadUpdate) {
+    if (!threadSyncToTask.has(targetId)) {
+        threadSyncToTask.set(targetId, new SharedObject());
+    }
+    threadSyncToTask.get(targetId)?.waitStore(data, 1);
+}
+
+/**
+ * Handles messages emitted by a Task worker (mirrors browser api/task.ts taskCallback).
+ * @param message The message posted by the Task worker.
+ */
+function taskCallback(message: any) {
+    if (isRegistryData(message)) {
+        handleRegistryData(message);
+    } else if (isThreadUpdate(message)) {
+        handleThreadUpdate(message, true);
+    } else if (isTaskData(message) && message.state === TaskState.STOP) {
+        endTask(message.id);
+    } else if (typeof message === "string") {
+        handleStringMessage(message);
     }
 }
 
@@ -594,39 +711,87 @@ function messageCallback(message: any, _?: any) {
     if (typeof message === "string") {
         handleStringMessage(message);
     } else if (message instanceof ImageData) {
-        if (program.screenshot) {
-            saveScreenshot(message, program.screenshot);
-        }
-        if (program.ascii) {
-            const canvas = createCanvas(message.width, message.height);
-            const ctx = canvas.getContext("2d");
-            canvas.width = message.width;
-            canvas.height = message.height;
-            ctx.putImageData(message, 0, 0);
-            const columns = typeof program.ascii === "number" && program.ascii > 0 ? program.ascii : maxColumns;
-            if (program.unicode) {
-                printFrame(renderUnicodeFrame(columns, canvas));
-            } else {
-                printFrame(renderAsciiFrame(columns, canvas));
-            }
-        }
+        renderFrame(message);
+    } else if (message?.image?.data instanceof ArrayBuffer) {
+        // Frame relayed from the engine worker (see app-worker.ts): rebuild the ImageData
+        // that structuredClone stripped of its prototype on the way across the thread.
+        const { width, height, data } = message.image;
+        renderFrame(new ImageData(new Uint8ClampedArray(data), width, height));
+    } else if (typeof message?.appExit === "string") {
+        finalizeRun(message.appExit);
     } else if (isTaskData(message)) {
         handleTaskData(message);
+    } else if (isThreadUpdate(message)) {
+        handleThreadUpdate(message, false);
     } else if (isRegistryData(message)) {
-        if (program.ecp) {
-            brsWorker?.postMessage(message.current);
-        }
-        if (program.registry) {
-            const strRegistry = JSON.stringify([...message.current]);
-            try {
-                if (!fs.existsSync(paths.data)) {
-                    fs.mkdirSync(paths.data, { recursive: true });
-                }
-                fs.writeFileSync(path.resolve(paths.data, "registry.json"), strRegistry);
-            } catch (err: any) {
-                console.error(chalk.red(err.message));
+        handleRegistryData(message);
+    }
+}
+
+/**
+ * Routes registry telemetry from the engine/task workers to the ECP service and disk.
+ * @param message Registry data message containing the current registry map.
+ */
+function handleRegistryData(message: any) {
+    if (program.ecp) {
+        brsWorker?.postMessage(message.current);
+    }
+    if (program.registry) {
+        const strRegistry = JSON.stringify([...message.current]);
+        try {
+            if (!fs.existsSync(paths.data)) {
+                fs.mkdirSync(paths.data, { recursive: true });
             }
+            fs.writeFileSync(path.resolve(paths.data, "registry.json"), strRegistry);
+        } catch (err: any) {
+            console.error(chalk.red(err.message));
         }
+    }
+}
+
+/**
+ * Renders a frame emitted by the engine: writes the screenshot PNG and/or the ASCII frame.
+ * @param frame - The rendered ImageData for the current display buffer.
+ */
+function renderFrame(frame: ImageData) {
+    if (program.screenshot) {
+        saveScreenshot(frame, program.screenshot);
+    }
+    if (program.ascii) {
+        const canvas = createCanvas(frame.width, frame.height);
+        const ctx = canvas.getContext("2d");
+        canvas.width = frame.width;
+        canvas.height = frame.height;
+        ctx.putImageData(frame, 0, 0);
+        const columns = typeof program.ascii === "number" && program.ascii > 0 ? program.ascii : maxColumns;
+        if (program.unicode) {
+            printFrame(renderUnicodeFrame(columns, canvas));
+        } else {
+            printFrame(renderAsciiFrame(columns, canvas));
+        }
+    }
+}
+
+/**
+ * Finalizes a worker-mode run when the engine worker reports the app has exited.
+ * Terminates the engine, ECP, and any Task workers, then prints the exit banner.
+ * @param exitReason - The AppExitReason reported by the engine worker.
+ */
+function finalizeRun(exitReason: string) {
+    appWorker?.terminate();
+    brsWorker?.terminate();
+    for (const worker of taskWorkers.values()) {
+        worker.terminate();
+    }
+    taskWorkers.clear();
+    threadSyncToTask.clear();
+    threadSyncToMain.clear();
+    const msg = `------ Finished '${appFileName}' execution [${exitReason}] ------\n`;
+    if (exitReason === AppExitReason.UserNav) {
+        console.log(chalk.blueBright(msg));
+    } else {
+        process.exitCode = 1;
+        console.log(chalk.redBright(msg));
     }
 }
 
@@ -649,10 +814,41 @@ function handleStringMessage(message: string) {
         process.exitCode = 1;
     } else if (mType === "debug") {
         console.debug(chalk.gray(msg.trimEnd()));
+    } else if (mType === "audio") {
+        handleAudioControl(msg);
     } else if (mType === "end" && msg.trimEnd() !== AppExitReason.UserNav) {
         process.exitCode = 1;
     } else if (!["start", "command", "reset", "video", "audio", "syslog", "end"].includes(mType)) {
         console.info(chalk.blueBright(message.trimEnd()));
+    }
+}
+
+/**
+ * Simulates the audio-playback state machine for the headless CLI. A real device (and the
+ * browser host in api/sound.ts) plays the stream and writes MediaEvent flags into the shared
+ * array; the engine polls those (SGRoot.processAudio -> Audio.setState) to drive the node's
+ * `state` field. Headless has no audio device, so we mirror the lifecycle (playing/paused/
+ * resumed/stopped) without decoding audio, keeping playback logic faithfully testable.
+ *
+ * Note: the transition is reported immediately rather than via a simulated buffering delay,
+ * because the engine worker floods the main thread with render frames and starves macrotask
+ * timers (setTimeout); Atomics writes from a worker 'message' handler stay reliable.
+ * @param control The audio control verb forwarded by the engine (e.g. "play", "pause").
+ */
+function handleAudioControl(control: string) {
+    const action = control.split(",")[0];
+    const signal = (event: number) => {
+        Atomics.store(sharedArray, DataType.SND, event);
+        Atomics.notify(sharedArray, DataType.SND);
+    };
+    if (action === "play" || action === "start") {
+        signal(MediaEvent.StartStream);
+    } else if (action === "pause") {
+        signal(MediaEvent.Paused);
+    } else if (action === "resume") {
+        signal(MediaEvent.Resumed);
+    } else if (action === "stop") {
+        signal(-1);
     }
 }
 
