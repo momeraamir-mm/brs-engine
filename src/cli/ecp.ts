@@ -27,6 +27,7 @@ let ecp: restana.Service<restana.Protocol.HTTP>;
 let ssdp: any;
 let device: DeviceInfo;
 let sharedArray: Int32Array;
+let launchArray: Int32Array | undefined;
 let isECPEnabled = false;
 let cliRegistry = new Map<string, string>();
 
@@ -40,6 +41,8 @@ if (!isMainThread && parentPort) {
             sharedArray = new Int32Array(data);
             initControlModule(sharedArray);
             enableECP();
+        } else if (data?.launch instanceof SharedArrayBuffer) {
+            launchArray = new Int32Array(data.launch);
         } else if (data instanceof Map) {
             cliRegistry = data;
         }
@@ -200,7 +203,7 @@ function processRequest(ws: WebSocket, message: RawData) {
         } else if (msg["request"]?.startsWith("query")) {
             reply = queryReply(msg, statusOK);
         } else if (msg["request"] === "launch") {
-            launchApp(msg["param-channel-id"]);
+            launchApp(msg["param-channel-id"], extractLaunchParams(msg));
             reply = `{${statusOK}}`;
         } else if (msg["request"] === "key-press") {
             sendKeyPress(msg["param-key"], null);
@@ -363,7 +366,7 @@ function sendRegistry(req: any, res: any) {
  * @param res - The HTTP response object
  */
 function sendLaunchApp(req: any, res: any) {
-    launchApp(req.params.appID);
+    launchApp(req.params.appID, req.query ?? {});
     res?.end();
 }
 
@@ -645,12 +648,42 @@ function genAppRegistry(plugin: string, encrypt: boolean) {
 // Helper Functions
 
 /**
- * Launches an application by ID.
- * Note: Not currently supported on CLI.
- * @param appID - The application identifier
+ * Extracts deep-link parameters from an ECP-2 WebSocket launch message.
+ * Strips the `param-` prefix and drops the channel id.
+ * @param msg - The parsed ECP-2 message object
+ * @returns A key/value record of deep-link parameters
  */
-function launchApp(appID: string) {
-    // Not supported on CLI
+function extractLaunchParams(msg: any): Record<string, string> {
+    const params: Record<string, string> = {};
+    for (const key of Object.keys(msg)) {
+        if (key.startsWith("param-") && key !== "param-channel-id") {
+            params[key.slice(6)] = String(msg[key]);
+        }
+    }
+    return params;
+}
+
+/**
+ * Launches an application by ID, signaling the deep-link parameters to the main thread.
+ * The params are written to the shared launch buffer and an Atomics flag is set; the main
+ * thread drains it per render frame and relaunches the engine worker so Main(args) is
+ * re-entered with the deep link (cold-start Direct-to-Play, ECP POST /launch/<appID>?...).
+ * The shared-buffer path (vs. a postMessage relay) survives the main-thread frame flood
+ * during playback, mirroring how keypresses reach the engine.
+ * @param appID - The application identifier
+ * @param params - Deep-link key/value parameters (e.g. contentId, mediaType)
+ */
+function launchApp(appID: string, params: Record<string, string> = {}) {
+    if (!launchArray) {
+        return;
+    }
+    const json = JSON.stringify(params ?? {});
+    const len = Math.min(json.length, launchArray.length - 2);
+    Atomics.store(launchArray, 1, len);
+    for (let i = 0; i < len; i++) {
+        Atomics.store(launchArray, 2 + i, json.charCodeAt(i));
+    }
+    Atomics.store(launchArray, 0, 1);
 }
 
 /**

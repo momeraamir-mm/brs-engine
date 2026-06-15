@@ -250,18 +250,16 @@ export function createPayload(launchTime: number): AppPayload {
  * Sets up deep link parameters for app launch.
  * Includes exit reason and source parameters.
  * @param deepLink Map of key-value pairs for deep link parameters
+ * @param source The launch "source" parameter (default "auto-run-dev"):
+ * - "auto-run-dev" when app is side-loaded (default)
+ * - "homescreen" when opening from home screen
+ * - "other-channel" when using roAppManager.launchApp()
+ * - "external-control" when deep linking (ECP /launch)
  */
-export function setupDeepLink(deepLink: Map<string, string>) {
+export function setupDeepLink(deepLink: Map<string, string>, source: string = "auto-run-dev") {
     inputParams.clear();
     inputParams.set("lastExitOrTerminationReason", currentApp.exitReason ?? AppExitReason.Unknown);
-    /**
-     * Options for "source" parameter:
-     * - "auto-run-dev" when app is side-loaded (default)
-     * - "homescreen" when opening from home screen
-     * - "other-channel" when using roAppManager.launchApp()
-     * - "external-control" when deep linking
-     */
-    inputParams.set("source", "auto-run-dev");
+    inputParams.set("source", source);
     for (const [key, value] of deepLink) {
         inputParams.set(key, value);
     }

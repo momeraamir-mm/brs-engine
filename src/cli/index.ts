@@ -18,7 +18,7 @@ import { ImageData, createCanvas } from "canvas";
 import chalk from "chalk";
 import { Command } from "commander";
 import stripAnsi from "strip-ansi";
-import { deviceData, loadAppZip, updateAppZip, subscribePackage, mountExt, setupDeepLink } from "./package";
+import { deviceData, loadAppZip, updateAppZip, subscribePackage, mountExt, setupDeepLink, createPayload } from "./package";
 import { deriveMaxColumns, renderAsciiFrame, renderUnicodeFrame, printFrame, frameToPngBuffer } from "./display";
 import { isNumber } from "../api/util";
 import {
@@ -76,6 +76,15 @@ let workerReady = false;
 let sharedBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * length);
 let sharedArray = new Int32Array(sharedBuffer);
 sharedArray.fill(-1);
+// Launch request channel (ECP worker -> main), separate from the control buffer.
+// The ECP worker writes the deep-link params here and sets an Atomics flag; the main
+// thread checks it per render frame (see messageCallback), so a deep-link launch lands
+// even while the app floods the main thread with frames during playback — a postMessage
+// relay gets starved there, but a per-frame Atomics check does not. Layout: [0]=flag,
+// [1]=JSON char length, [2..]=JSON char codes. Zero-initialized (flag idle = 0).
+const LAUNCH_BUF_LEN = 258;
+const launchBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * LAUNCH_BUF_LEN);
+const launchArray = new Int32Array(launchBuffer);
 
 /**
  * CLI program, params definition and action processing.
@@ -299,6 +308,7 @@ async function runApp(payload: AppPayload) {
                 process.exitCode = 1;
             }
         });
+        brsWorker.postMessage({ launch: launchBuffer });
         brsWorker.postMessage(sharedBuffer);
         return;
     }
@@ -307,20 +317,7 @@ async function runApp(payload: AppPayload) {
         // main thread stays free to spawn SceneGraph Task workers on demand. Running the
         // engine on the main thread starves the event loop (infinite render loop) and Task
         // workers never boot. The app's exit is reported back via an { appExit } message.
-        try {
-            const worker = new Worker(path.join(__dirname, "brs.app.js"));
-            appWorker = worker;
-            worker.on("message", (msg: any) => messageCallback(msg));
-            worker.on("error", (err: any) => {
-                console.error(chalk.red(`Error executing app: ${err.message}`));
-                process.exitCode = 1;
-            });
-            worker.postMessage(sharedBuffer);
-            worker.postMessage(payload);
-        } catch (err: any) {
-            console.error(chalk.red(`Error executing app: ${err.message}`));
-            process.exitCode = 1;
-        }
+        spawnAppWorker(payload);
         return;
     }
     try {
@@ -353,6 +350,82 @@ async function runApp(payload: AppPayload) {
         console.error(chalk.red(`Error executing app: ${err.message}`));
         process.exitCode = 1;
     }
+}
+
+/**
+ * Spawns the engine app worker for the given payload and wires its message/error channels.
+ * Factored out of runApp so a deep-link launch can relaunch the app the same way.
+ * @param payload - The application payload to execute in the worker.
+ */
+function spawnAppWorker(payload: AppPayload) {
+    try {
+        const worker = new Worker(path.join(__dirname, "brs.app.js"));
+        appWorker = worker;
+        worker.on("message", (msg: any) => messageCallback(msg));
+        worker.on("error", (err: any) => {
+            console.error(chalk.red(`Error executing app: ${err.message}`));
+            process.exitCode = 1;
+        });
+        worker.postMessage(sharedBuffer);
+        worker.postMessage(payload);
+    } catch (err: any) {
+        console.error(chalk.red(`Error executing app: ${err.message}`));
+        process.exitCode = 1;
+    }
+}
+
+/**
+ * Drains a pending deep-link launch request written by the ECP worker into the launch
+ * buffer (Atomics flag at [0]). Called per render frame from messageCallback, so it fires
+ * even while playback floods the main thread — the reason the request rides the shared
+ * buffer instead of a (starvable) postMessage relay.
+ */
+function checkLaunchRequest() {
+    if (Atomics.load(launchArray, 0) !== 1) {
+        return;
+    }
+    const len = Atomics.load(launchArray, 1);
+    let json = "";
+    for (let i = 0; i < len; i++) {
+        json += String.fromCharCode(Atomics.load(launchArray, 2 + i));
+    }
+    Atomics.store(launchArray, 0, 0); // consume the request
+    try {
+        relaunchApp(JSON.parse(json));
+    } catch (err: any) {
+        console.error(chalk.red(`Invalid deep-link launch request: ${err.message}`));
+    }
+}
+
+/**
+ * Relaunches the running app with deep-link parameters (ECP POST /launch/<appID>).
+ * Mirrors a real device cold-start deep link: the engine worker is torn down and respawned
+ * so Main(args) is re-entered with the contentId/mediaType, exercising the Direct-to-Play
+ * path that certification requires. The ECP worker and process stay alive across the relaunch.
+ * @param params - Deep-link key/value parameters (e.g. { contentId, mediaType }).
+ */
+function relaunchApp(params: Record<string, string>) {
+    if (!currentPayload || program.pack.length > 0) {
+        return;
+    }
+    const deepLink = new Map<string, string>();
+    for (const [key, value] of Object.entries(params ?? {})) {
+        if (value !== undefined && value !== null && key !== "source_ip_addr") {
+            deepLink.set(key, String(value));
+        }
+    }
+    setupDeepLink(deepLink, "external-control");
+    currentPayload = createPayload(Date.now());
+    // Tear down the current engine + Task workers (keep the ECP worker + process alive).
+    appWorker?.terminate();
+    for (const worker of taskWorkers.values()) {
+        worker.terminate();
+    }
+    taskWorkers.clear();
+    threadSyncToTask.clear();
+    threadSyncToMain.clear();
+    console.log(chalk.blueBright(`Relaunching '${appFileName}' via deep link...\n`));
+    spawnAppWorker(currentPayload);
 }
 
 /**
@@ -708,6 +781,7 @@ function taskCallback(message: any) {
 }
 
 function messageCallback(message: any, _?: any) {
+    checkLaunchRequest();
     if (typeof message === "string") {
         handleStringMessage(message);
     } else if (message instanceof ImageData) {
