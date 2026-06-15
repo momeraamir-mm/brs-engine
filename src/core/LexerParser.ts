@@ -90,6 +90,10 @@ export function lexParseSync(
         }
     } catch (err: any) {
         exitReason = AppExitReason.Crashed;
+        // Surface the failure instead of crashing mute — e.g. a malformed manifest bs_const
+        // throws here, and without this the run ends as a bare EXIT_BRIGHTSCRIPT_CRASH with no
+        // diagnostic. Handles both BrsError (.format()) and plain Error (.message).
+        postMessage(`error,${err?.format?.() ?? err?.message ?? err}`);
     }
     return {
         exitReason: exitReason,

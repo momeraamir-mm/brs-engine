@@ -109,6 +109,7 @@ program
     .option("-y, --registry", "Persist the simulated device registry on disk.", false)
     .option("--analyze", "Run the Store-Analysis / certification preflight on the package and exit.", false)
     .option("--prev <version>", "Published version to diff against for the bump check (use with --analyze).")
+    .option("--verbose", "Show engine debug-level log messages (Task/SceneGraph internals).", false)
     .action(async (brsFiles, program) => {
         if (program.analyze) {
             process.exit(runAnalyze(brsFiles[0], { prev: program.prev }));
@@ -125,7 +126,11 @@ program
                 deviceData.connectionInfo.gateway = gateway;
                 deviceData.connectionInfo.name = int ?? "eth1";
             } catch (err: any) {
-                console.error(chalk.red(`Unable to get the Network Gateway: ${err.message}`));
+                // Non-fatal: the gateway is unused headless, and default-gateway shells out to
+                // wmic (removed in Windows 11). Only surface it in verbose mode to avoid noise.
+                if (program.verbose) {
+                    console.warn(chalk.yellow(`Network gateway unavailable: ${err.message}`));
+                }
             }
             deviceData.connectionInfo.dns = dns.getServers();
             deviceData.debugOnCrash = program.debug ?? false;
@@ -893,7 +898,9 @@ function handleStringMessage(message: string) {
         console.error(chalk.red(msg.trimEnd()));
         process.exitCode = 1;
     } else if (mType === "debug") {
-        console.debug(chalk.gray(msg.trimEnd()));
+        if (program.verbose) {
+            console.debug(chalk.gray(msg.trimEnd()));
+        }
     } else if (mType === "audio") {
         handleAudioControl(msg);
     } else if (mType === "end" && msg.trimEnd() !== AppExitReason.UserNav) {
