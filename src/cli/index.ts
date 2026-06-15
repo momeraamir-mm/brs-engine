@@ -19,6 +19,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import stripAnsi from "strip-ansi";
 import { deviceData, loadAppZip, updateAppZip, subscribePackage, mountExt, setupDeepLink, createPayload } from "./package";
+import { runAnalyze } from "./analyze";
 import { deriveMaxColumns, renderAsciiFrame, renderUnicodeFrame, printFrame, frameToPngBuffer } from "./display";
 import { isNumber } from "../api/util";
 import {
@@ -106,7 +107,12 @@ program
     .option("-x, --ext-vol <path>", "Path to directory or zip file from which `ext1:` will be mounted.")
     .option("-k, --deep-link <params>", "Parameters to be passed to the application. (format: key=value,...)")
     .option("-y, --registry", "Persist the simulated device registry on disk.", false)
+    .option("--analyze", "Run the Store-Analysis / certification preflight on the package and exit.", false)
+    .option("--prev <version>", "Published version to diff against for the bump check (use with --analyze).")
     .action(async (brsFiles, program) => {
+        if (program.analyze) {
+            process.exit(runAnalyze(brsFiles[0], { prev: program.prev }));
+        }
         if (!checkParameters()) {
             return;
         }

@@ -25,7 +25,7 @@
     "start": "npm run start -w brs-engine",
     "clean": "npm run clean --workspaces",
     "test": "jest",
-    "analyze": "node scripts/analyze.js",
+    "analyze": "node packages/node/bin/brs.cli.js --analyze",
     "lint": "eslint -c .eslintrc.js --ext .ts ./src",
     "prettier:write": "prettier --write \"{packages,src,test}/**/*.{js,ts}\"",
     "prettier": "prettier --check \"{packages,src,test}/**/*.{js,ts}\""
