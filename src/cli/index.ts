@@ -86,6 +86,9 @@ sharedArray.fill(-1);
 const LAUNCH_BUF_LEN = 258;
 const launchBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * LAUNCH_BUF_LEN);
 const launchArray = new Int32Array(launchBuffer);
+// True while a deep-link relaunch is tearing down the old worker and spawning the new one.
+// Guards against starting a second relaunch (and a second node-canvas renderer) mid-teardown.
+let relaunching = false;
 
 /**
  * CLI program, params definition and action processing.
@@ -395,6 +398,10 @@ function checkLaunchRequest() {
     if (Atomics.load(launchArray, 0) !== 1) {
         return;
     }
+    if (relaunching) {
+        // A relaunch is still tearing down; leave the request flag set and retry next frame.
+        return;
+    }
     const len = Atomics.load(launchArray, 1);
     let json = "";
     for (let i = 0; i < len; i++) {
@@ -402,7 +409,9 @@ function checkLaunchRequest() {
     }
     Atomics.store(launchArray, 0, 0); // consume the request
     try {
-        relaunchApp(JSON.parse(json));
+        relaunchApp(JSON.parse(json)).catch((err: any) =>
+            console.error(chalk.red(`Relaunch failed: ${err.message}`))
+        );
     } catch (err: any) {
         console.error(chalk.red(`Invalid deep-link launch request: ${err.message}`));
     }
@@ -415,28 +424,41 @@ function checkLaunchRequest() {
  * path that certification requires. The ECP worker and process stay alive across the relaunch.
  * @param params - Deep-link key/value parameters (e.g. { contentId, mediaType }).
  */
-function relaunchApp(params: Record<string, string>) {
-    if (!currentPayload || program.pack.length > 0) {
+async function relaunchApp(params: Record<string, string>) {
+    if (!currentPayload || program.pack.length > 0 || relaunching) {
         return;
     }
-    const deepLink = new Map<string, string>();
-    for (const [key, value] of Object.entries(params ?? {})) {
-        if (value !== undefined && value !== null && key !== "source_ip_addr") {
-            deepLink.set(key, String(value));
+    relaunching = true;
+    try {
+        const deepLink = new Map<string, string>();
+        for (const [key, value] of Object.entries(params ?? {})) {
+            if (value !== undefined && value !== null && key !== "source_ip_addr") {
+                deepLink.set(key, String(value));
+            }
         }
+        setupDeepLink(deepLink, "external-control");
+        currentPayload = createPayload(Date.now());
+        // Tear down the current engine + Task workers (keep the ECP worker + process alive).
+        // Await full termination BEFORE respawning: Worker.terminate() is asynchronous, and
+        // node-canvas/Cairo holds process-global render/font state — letting the old worker
+        // keep rendering while the new one starts races in the native layer and intermittently
+        // aborts the process (the flaky doDrawRotatedText crash). Awaiting serialises them.
+        const dying: Promise<number>[] = [];
+        if (appWorker) {
+            dying.push(appWorker.terminate());
+        }
+        for (const worker of taskWorkers.values()) {
+            dying.push(worker.terminate());
+        }
+        taskWorkers.clear();
+        threadSyncToTask.clear();
+        threadSyncToMain.clear();
+        await Promise.all(dying);
+        console.log(chalk.blueBright(`Relaunching '${appFileName}' via deep link...\n`));
+        spawnAppWorker(currentPayload);
+    } finally {
+        relaunching = false;
     }
-    setupDeepLink(deepLink, "external-control");
-    currentPayload = createPayload(Date.now());
-    // Tear down the current engine + Task workers (keep the ECP worker + process alive).
-    appWorker?.terminate();
-    for (const worker of taskWorkers.values()) {
-        worker.terminate();
-    }
-    taskWorkers.clear();
-    threadSyncToTask.clear();
-    threadSyncToMain.clear();
-    console.log(chalk.blueBright(`Relaunching '${appFileName}' via deep link...\n`));
-    spawnAppWorker(currentPayload);
 }
 
 /**

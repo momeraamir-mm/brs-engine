@@ -152,6 +152,15 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
         add("warning", "Certification", "No roInput usage found — deep links arriving while the app runs won't be handled (cert-mandatory).");
     if (!/contentId/i.test(brsText))
         add("warning", "Certification", "No contentId handling found — Direct-to-Play deep linking is cert-mandatory.");
+    // The manifest must ADVERTISE deep-link capability — code alone is not enough.
+    // Without supports_input_launch, Roku Static Analysis reports the channel as
+    // deep-linking-unsupported (isDeepLinkingSupportEnabled=false) even when the
+    // BrightScript handles contentId/roInput correctly (the D54 defect).
+    const implementsDeepLink = hasMainArgs && /roInput/i.test(brsText) && /contentId/i.test(brsText);
+    if (implementsDeepLink && !man["supports_input_launch"])
+        add("warning", "Certification", "Manifest missing supports_input_launch=1 — the channel implements deep linking in code but does not advertise it, so Roku Static Analysis reports deep linking as unsupported (cert-mandatory).");
+    if (implementsDeepLink && !/mediaType/i.test(brsText))
+        add("info", "Certification", "No mediaType handling found — Roku deep links carry both contentId and mediaType; accept (and tolerate) mediaType alongside contentId.");
 
     // --- Code usage: monetization consistency (the real Billing 2.5 ERROR we hit) ---
     if (/roChannelStore/i.test(brsText))
