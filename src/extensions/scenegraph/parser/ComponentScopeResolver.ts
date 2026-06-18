@@ -1,4 +1,4 @@
-import { Lexer, logError, Parser, preprocessor as PP, Stmt, FileSystem } from "brs-engine";
+import { Lexer, logError, Parser, parseLibraries, preprocessor as PP, Stmt, FileSystem } from "brs-engine";
 import { ComponentDefinition, ComponentScript } from "./ComponentDefinition";
 import { SGNodeFactory } from "../factory/NodeFactory";
 import pSettle from "p-settle";
@@ -164,7 +164,22 @@ export class ComponentScopeResolver {
                     throw new Error("Error occurred parsing");
                 }
 
-                return parseResults.statements;
+                // Load any `Library "X.brs"` referenced by this component script and append its
+                // functions, so they're callable inside the component — same as the source scope
+                // (LexerParser). Without this a component-scope Library statement parses but its
+                // functions never load (D76 secondary). flatten() keeps only Stmt.Function, and
+                // dedupes by name across the hierarchy, so repeated libs collapse to one copy.
+                const lib = new Map<string, string>();
+                parseLibraries(fs, parseResults, lib, manifest);
+                const statements = [...parseResults.statements];
+                for (const [key, source] of lib) {
+                    if (source !== "") {
+                        const libScan = lexer.scan(source, key);
+                        const libParse = parser.parse(libScan.tokens);
+                        statements.push(...libParse.statements);
+                    }
+                }
+                return statements;
             }
 
             const promises: Promise<Stmt.Statement[]>[] = [];
