@@ -53,15 +53,20 @@ export class ComponentScopeResolver {
      * @returns A collection of statements that have been flattened based on hierarchy.
      */
     private flatten(statementMap: Stmt.Statement[][]): Stmt.Statement[] {
-        let statements = statementMap.shift() || [];
-        let statementMemo = new Set(
-            statements.filter((_): _ is Stmt.Function => true).map((statement) => statement.name.text.toLowerCase())
+        // Keep ONLY Function statements in scope. A component script may legally contain
+        // non-Function top-level statements (e.g. `Library "Roku_Ads.brs"`). The old
+        // `filter((_): _ is Stmt.Function => true)` was a no-op type guard — it let every
+        // statement through, then `statement.name.text` threw on the nameless Library
+        // statement, wrongly breaking the entire component (functions left unregistered).
+        let statements = (statementMap.shift() || []).filter(
+            (s): s is Stmt.Function => s instanceof Stmt.Function
         );
+        let statementMemo = new Set(statements.map((statement) => statement.name.text.toLowerCase()));
         while (statementMap.length > 0) {
             let extendedFns = statementMap.shift() || [];
             statements = statements.concat(
                 extendedFns
-                    .filter((_): _ is Stmt.Function => true)
+                    .filter((s): s is Stmt.Function => s instanceof Stmt.Function)
                     .filter((statement) => {
                         let statementName = statement.name.text.toLowerCase();
                         let haveFnName = statementMemo.has(statementName);
