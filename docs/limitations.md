@@ -57,6 +57,7 @@ The **BrightScript Engine** implements the BrightScript language specification u
 * The string `mod` cannot be used as variable or function parameter name, because it conflicts with remainder operator `Mod` (Roku devices allows that).
 * Screensaver functionality is not yet implemented.
 * SDK 1.0 deprecated components are not supported, but will be implemented in the future as a legacy apps preservation initiative.
+* `Library "<name>.brs"` statements only work in **source scope** (`source/**`). A `Library` statement inside a **SceneGraph component** `<script>` currently breaks that component's script loading (its functions become "non-implemented"). On a real Roku, `Library` is valid inside component scripts, so this is a fidelity gap to fix. Workaround: declare the `Library` (e.g. `Roku_Ads.brs` for RAF) in a `source/` file and call its globals from there. (Verified 2026-06-17.)
 
 ## Mocked Components and Libraries
 

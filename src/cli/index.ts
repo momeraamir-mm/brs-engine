@@ -925,6 +925,8 @@ function handleStringMessage(message: string) {
         }
     } else if (mType === "audio") {
         handleAudioControl(msg);
+    } else if (mType === "video") {
+        handleVideoControl(msg);
     } else if (mType === "end" && msg.trimEnd() !== AppExitReason.UserNav) {
         process.exitCode = 1;
     } else if (!["start", "command", "reset", "video", "audio", "syslog", "end"].includes(mType)) {
@@ -958,6 +960,32 @@ function handleAudioControl(control: string) {
         signal(MediaEvent.Resumed);
     } else if (action === "stop") {
         signal(-1);
+    }
+}
+
+/**
+ * Simulates the video-playback state machine for the headless CLI — the video
+ * counterpart of handleAudioControl. A real device (and the browser host in
+ * api/video.ts) decodes the stream and writes events into the shared array; the
+ * engine polls DataType.VDO (SGRoot.processVideo -> Video.setState) to drive the
+ * node's `state` field. Headless has no video decoder, so we mirror the lifecycle
+ * (playing/paused/stopped) without decoding, keeping playback logic testable.
+ * @param control The video control verb forwarded by the engine (e.g. "play").
+ */
+function handleVideoControl(control: string) {
+    const action = control.split(",")[0];
+    const signal = (event: number) => {
+        Atomics.store(sharedArray, DataType.VDO, event);
+        Atomics.notify(sharedArray, DataType.VDO);
+    };
+    if (action === "play" || action === "start" || action === "replay") {
+        signal(MediaEvent.StartStream);
+    } else if (action === "resume") {
+        signal(MediaEvent.Resumed);
+    } else if (action === "pause") {
+        signal(MediaEvent.Paused);
+    } else if (action === "stop") {
+        signal(MediaEvent.Partial);
     }
 }
 
