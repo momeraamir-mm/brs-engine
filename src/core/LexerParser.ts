@@ -165,8 +165,12 @@ export function parseDecodedTokens(fs: FileSystem, manifest: Map<string, any>, d
  * @param parseResults ParseResults object with the parsed code
  * @param lib Collection with the libraries source code
  * @param manifest Map with the manifest data
+ *
+ * Exported so SceneGraph component scopes can load `Library` source the same way the
+ * source scope does (ComponentScopeResolver) — Library-in-component must make the
+ * library's functions callable inside that component, matching real Roku (D76).
  */
-function parseLibraries(
+export function parseLibraries(
     fs: FileSystem,
     parseResults: ParseResults,
     lib: Map<string, string>,
