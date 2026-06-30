@@ -240,6 +240,20 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
         if (!implementsDeepLink)
             add("error", "Standards", "Deep-link handler incomplete — need Main(args) + roInput + contentId routing (cert-mandatory Direct-to-Play).");
 
+        // R6 — capability gate: an audio-only app must not contain a Video node (a Video
+        // node suppresses the system screensaver — a cert violation for audio-only
+        // playback). Keyed on the DECLARED capability `mm_media=audio` (a capability
+        // attribute, NOT an archetype): a real video app is unaffected, and an app that
+        // doesn't declare audio intent isn't checked for this rule.
+        if ((man["mm_media"] || "").toLowerCase() === "audio") {
+            const hasVideoNode =
+                xmlNames.some((xn) => /<Video[\s/>]/i.test(strFromU8(files[xn]))) ||
+                /createObject\s*\(\s*"roSGNode"\s*,\s*"Video"\s*\)/i.test(brsText) ||
+                /createObject\s*\(\s*"roVideoPlayer"\s*\)/i.test(brsText);
+            if (hasVideoNode)
+                add("error", "Standards", "Audio-only app (mm_media=audio) contains a Video node — a Video node suppresses the system screensaver (cert violation for audio-only playback); use an Audio node.");
+        }
+
         // NOTE: "no >1 Hz hot field on the visual tree" is intentionally NOT linted — update
         // frequency isn't statically determinable (the device-validated reference uses
         // alwaysNotify on low-frequency bridge command fields, which a blanket check would
