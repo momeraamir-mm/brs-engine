@@ -21,6 +21,9 @@ interface Finding {
 
 export interface AnalyzeOptions {
     prev?: string;
+    /** Also run the house coding-standards checks (category "Standards"). Off by default
+     *  so the cert preflight stays focused on Store rules; the generator/Evaluator opts in. */
+    standards?: boolean;
 }
 
 // A Roku channel needs only these top-level entries; anything else is "extraneous".
@@ -165,8 +168,10 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
     // --- Code usage: monetization consistency (the real Billing 2.5 ERROR we hit) ---
     if (/roChannelStore/i.test(brsText))
         add("info", "Monetization", "roChannelStore usage found — ensure the Dashboard Monetization declares in-channel products (a code/Dashboard mismatch fails Store Analysis).");
+    else if (/pay-to-install/i.test(brsText))
+        add("info", "Monetization", "Pay-to-install marker found — the install charge is store-gated, so NO in-channel billing code is required; ensure Dashboard Monetization is set to PayToInstall (not Free) with a price tier.");
     else
-        add("info", "Monetization", "No roChannelStore/Roku Pay usage — ensure Dashboard Monetization is set to Free; a 'charging' setting with no IAP code triggers the Billing 2.5 ERROR.");
+        add("info", "Monetization", "No roChannelStore/Roku Pay usage — ensure Dashboard Monetization is set to Free (or PayToInstall, which needs no IAP code); a subscription/IAP 'charging' setting with no IAP code triggers the Billing 2.5 ERROR.");
 
     // --- Versioning: non-zero + bump vs the previously published build ---
     const curVer = [man["major_version"], man["minor_version"], man["build_version"]].map((v) => parseInt(v, 10) || 0);
@@ -180,6 +185,65 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
             add("info", "Versioning", `Version ${curVer.join(".")} > published ${prevVer.join(".")} — OK.`);
     } else {
         add("info", "Versioning", `Version ${curVer.join(".")} — pass --prev <published-version> to verify it was bumped vs the published build.`);
+    }
+
+    // --- House coding standards (opt-in via --standards; category "Standards") ---
+    // The mechanically-checkable subset of BRIGHTSCRIPT_STDS / SCENEGRAPH_STDS. High-
+    // confidence rules are ERRORs (fail the build, feed the Evaluator retry); fuzzy ones
+    // are WARNINGs to review. Judgment rules (architecture, minimal diffs) are NOT linted —
+    // they live in the standards docs + human review.
+    if (opts.standards) {
+        const brsNames = names.filter((n) => /\.brs$/i.test(n));
+        const xmlNames = names.filter((n) => /\.xml$/i.test(n));
+        // Which .brs run on a Task thread? A component whose xml extends a "*Task" base
+        // contributes its <script uri> files (and its own sibling .brs).
+        const taskBrs = new Set<string>();
+        for (const xn of xmlNames) {
+            const xml = strFromU8(files[xn]);
+            const ext = /extends\s*=\s*"([^"]+)"/i.exec(xml);
+            if (!ext || !/task/i.test(ext[1])) continue;
+            const uriRe = /uri\s*=\s*"pkg:\/([^"]+\.brs)"/gi;
+            let um: RegExpExecArray | null;
+            while ((um = uriRe.exec(xml)) !== null) taskBrs.add(um[1].toLowerCase());
+            taskBrs.add(xn.replace(/\.xml$/i, ".brs").toLowerCase());
+        }
+        const isTask = (n: string) => taskBrs.has(n.toLowerCase());
+
+        // R1 — `option explicit` is not valid BrightScript (compile error on device).
+        if (/\boption\s+explicit\b/i.test(brsText))
+            add("error", "Standards", "`option explicit` found — not valid BrightScript; rely on typed signatures instead.");
+
+        // R2 — no HTTP/file I/O outside a Task; R3 — never callFunc across threads.
+        const IO = /\b(roUrlTransfer|ReadAsciiFile|WriteAsciiFile|MoveFile|DeleteFile|CopyFile|ListDir|roFileSystem)\b/;
+        for (const n of brsNames) {
+            const txt = strFromU8(files[n]);
+            const io = IO.exec(txt);
+            if (io && !isTask(n))
+                add("error", "Standards", `HTTP/file I/O (${io[1]}) outside a Task in ${n} — move it into a Task component.`);
+            if (/\bcallFunc\b/i.test(txt) && isTask(n))
+                add("error", "Standards", `callFunc in a Task (${n}) crosses threads — Task→Scene handoff must be field copies only.`);
+        }
+
+        // R4 — typed signatures: a function/sub should declare an `as <type>` return (warning).
+        let untyped = 0;
+        for (const line of brsText.split("\n")) {
+            const m = /^\s*(?:function|sub)\s+(\w+)\s*\([^)]*\)\s*(.*)$/i.exec(line);
+            if (m && !/\bas\s+\w/i.test(m[2])) {
+                untyped++;
+                if (untyped <= 5)
+                    add("warning", "Standards", `Untyped signature '${m[1]}()' — declare an 'as <type>' return (typed signatures required).`);
+            }
+        }
+        if (untyped > 5) add("warning", "Standards", `... and ${untyped - 5} more untyped signature(s).`);
+
+        // R5 — deep-link handler must be present (cert-mandatory); ERROR in standards mode.
+        if (!implementsDeepLink)
+            add("error", "Standards", "Deep-link handler incomplete — need Main(args) + roInput + contentId routing (cert-mandatory Direct-to-Play).");
+
+        // NOTE: "no >1 Hz hot field on the visual tree" is intentionally NOT linted — update
+        // frequency isn't statically determinable (the device-validated reference uses
+        // alwaysNotify on low-frequency bridge command fields, which a blanket check would
+        // mis-flag). It stays a documented judgment rule for human review, not a linter check.
     }
 
     return f;

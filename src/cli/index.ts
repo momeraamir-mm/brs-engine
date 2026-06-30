@@ -112,10 +112,11 @@ program
     .option("-y, --registry", "Persist the simulated device registry on disk.", false)
     .option("--analyze", "Run the Store-Analysis / certification preflight on the package and exit.", false)
     .option("--prev <version>", "Published version to diff against for the bump check (use with --analyze).")
+    .option("--standards", "Also run the house coding-standards checks (typed sigs, no I/O outside a Task, etc.).", false)
     .option("--verbose", "Show engine debug-level log messages (Task/SceneGraph internals).", false)
     .action(async (brsFiles, program) => {
         if (program.analyze) {
-            process.exit(runAnalyze(brsFiles[0], { prev: program.prev }));
+            process.exit(runAnalyze(brsFiles[0], { prev: program.prev, standards: program.standards }));
         }
         if (!checkParameters()) {
             return;
