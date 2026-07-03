@@ -17,6 +17,17 @@ import { sgRoot } from "../SGRoot";
 import { rotateTranslation } from "../SGUtil";
 import { brsValueOf, jsValueOf } from "../factory/Serializer";
 
+// Per-frame budget for fulfilling deferred remote poster loads (D171). Each remote cover is a
+// synchronous download; fulfilling a whole grid in a single render blocks the main thread long
+// enough to starve the Task<->scene rendezvous (stalling catalog handoff). Loading only a few per
+// frame yields the thread back to process messages (incl. Task acks) between frames; the rest load
+// over subsequent frames (lazy, like a real device). Reset once per scene render (Scene.renderNode).
+const MAX_REMOTE_POSTER_LOADS_PER_FRAME = 2;
+let remotePosterLoadsThisFrame = 0;
+export function resetRemotePosterLoadBudget(): void {
+    remotePosterLoadsThisFrame = 0;
+}
+
 export class Poster extends Group {
     readonly defaultFields: FieldModel[] = [
         { name: "uri", type: "uri" },
@@ -38,6 +49,9 @@ export class Poster extends Group {
         { name: "audioGuideText", type: "string" },
     ];
     protected uri: string = "";
+    // Remote (http) uri whose download is deferred to renderNode so it never blocks the
+    // thread setting the field. "" means nothing pending. (D171)
+    protected pendingUri: string = "";
     protected bitmap?: RoBitmap;
     noScaling: boolean = false;
 
@@ -56,14 +70,23 @@ export class Poster extends Group {
             if (typeof uri === "string" && uri.trim() !== "" && this.uri !== uri) {
                 super.setValue("loadStatus", new BrsString("loading"));
                 this.uri = uri;
-                const loadStatus = this.loadUri(uri);
-                if (loadStatus !== "ready") {
-                    const failedUri = this.getValueJS("failedBitmapUri") as string;
-                    this.loadUri(failedUri);
+                if (uri.startsWith("http")) {
+                    // Defer remote downloads to renderNode (D171): a synchronous download here
+                    // blocks the thread that sets the field. For a grid of remote posters that
+                    // starves the Task<->scene rendezvous and stalls catalog handoff for
+                    // multi-item catalogs. Real devices load posters asynchronously too.
+                    this.pendingUri = uri;
+                } else {
+                    const loadStatus = this.loadUri(uri);
+                    if (loadStatus !== "ready") {
+                        const failedUri = this.getValueJS("failedBitmapUri") as string;
+                        this.loadUri(failedUri);
+                    }
+                    super.setValue("loadStatus", new BrsString(loadStatus));
                 }
-                super.setValue("loadStatus", new BrsString(loadStatus));
             } else if (typeof uri !== "string" || uri.trim() === "") {
                 this.uri = "";
+                this.pendingUri = "";
                 this.bitmap = undefined;
                 super.setValue("loadStatus", new BrsString("none"));
                 super.setValue("bitmapWidth", new Float(0));
@@ -79,6 +102,20 @@ export class Poster extends Group {
         if (!this.isVisible()) {
             this.updateRenderTracking(true);
             return;
+        }
+        // Fulfil a deferred remote load now, on the render thread, after catalog handoff has
+        // already completed — so a grid of remote posters loads lazily per visible tile
+        // instead of blocking the field-set that triggered it (D171).
+        if (this.pendingUri !== "" && remotePosterLoadsThisFrame < MAX_REMOTE_POSTER_LOADS_PER_FRAME) {
+            remotePosterLoadsThisFrame++;
+            const pending = this.pendingUri;
+            this.pendingUri = "";
+            const loadStatus = this.loadUri(pending);
+            if (loadStatus !== "ready") {
+                const failedUri = this.getValueJS("failedBitmapUri") as string;
+                this.loadUri(failedUri);
+            }
+            super.setValue("loadStatus", new BrsString(loadStatus));
         }
         const nodeTrans = this.getTranslation();
         const drawTrans = angle === 0 ? nodeTrans.slice() : rotateTranslation(nodeTrans, angle);

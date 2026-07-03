@@ -17,6 +17,7 @@ import { sgRoot } from "../SGRoot";
 import { Dialog } from "./Dialog";
 import { Group } from "./Group";
 import { Node } from "./Node";
+import { resetRemotePosterLoadBudget } from "./Poster";
 import { StandardDialog } from "./StandardDialog";
 import { FieldKind, FieldModel } from "../SGTypes";
 import { SGNodeType } from ".";
@@ -128,6 +129,7 @@ export class Scene extends Group {
             this.updateRenderTracking(true);
             return;
         }
+        resetRemotePosterLoadBudget(); // D171: fresh per-frame deferred-poster-load budget
         const rotation = angle + this.getRotation();
         const backColor = this.getValueJS("backgroundColor") as number;
         opacity = opacity * this.getOpacity();
