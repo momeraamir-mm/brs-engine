@@ -40,6 +40,7 @@ import {
     ThreadUpdate,
     ExtensionInfo,
     DataType,
+    DebugCommand,
     ExtVolInitialSize,
     ExtVolMaxSize,
 } from "../core/common";
@@ -440,10 +441,26 @@ async function relaunchApp(params: Record<string, string>) {
         setupDeepLink(deepLink, "external-control");
         currentPayload = createPayload(Date.now());
         // Tear down the current engine + Task workers (keep the ECP worker + process alive).
-        // Await full termination BEFORE respawning: Worker.terminate() is asynchronous, and
-        // node-canvas/Cairo holds process-global render/font state — letting the old worker
-        // keep rendering while the new one starts races in the native layer and intermittently
-        // aborts the process (the flaky doDrawRotatedText crash). Awaiting serialises them.
+        //
+        // QUIESCE FIRST, then terminate (D62 fix). node-canvas/Cairo holds process-global
+        // render/font state, and a hard Worker.terminate() while the engine is mid-render
+        // interrupts a native canvas op — node-canvas then calls napi_throw from a torn-down
+        // isolate, which escalates to napi_fatal_error and aborts the WHOLE process. The
+        // D167 try/catch in RoSGScreen cannot catch this (it is a fatal native abort, not a
+        // JS throw). Merely awaiting terminate()/settling (the earlier attempt) did NOT help
+        // because the worker keeps RENDERING the whole time, so terminate still lands mid-op.
+        //
+        // Fix: signal DebugCommand.PAUSE. The interpreter checks it in RoMessagePort.wait
+        // AFTER updateMessageQueue() runs the render callback (getNewEvents), so the worker
+        // finishes its in-flight frame and then blocks in Atomics.wait — node-canvas idle.
+        // A short settle guarantees the current frame completed before we terminate the now
+        // quiescent worker. PAUSE is cleared afterwards so the respawned worker (which shares
+        // this SharedArrayBuffer) runs normally instead of pausing on its first frame.
+        if (appWorker) {
+            Atomics.store(sharedArray, DataType.DBG, DebugCommand.PAUSE);
+            Atomics.notify(sharedArray, DataType.DBG);
+            await new Promise((resolve) => setTimeout(resolve, 120));
+        }
         const dying: Promise<number>[] = [];
         if (appWorker) {
             dying.push(appWorker.terminate());
@@ -455,6 +472,9 @@ async function relaunchApp(params: Record<string, string>) {
         threadSyncToTask.clear();
         threadSyncToMain.clear();
         await Promise.all(dying);
+        // Release the PAUSE latch before respawning (the new worker reuses sharedArray).
+        Atomics.store(sharedArray, DataType.DBG, -1);
+        Atomics.notify(sharedArray, DataType.DBG);
         console.log(chalk.blueBright(`Relaunching '${appFileName}' via deep link...\n`));
         spawnAppWorker(currentPayload);
     } finally {
