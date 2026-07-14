@@ -17,3 +17,9 @@ out/
 *.tgz
 desktop.ini
 .DS_Store
+
+# Zero-byte lock files the node xhr-sync worker drops per run (one per headless
+# launch, e.g. from tests/test-loop.py). Regenerated every time — never artifacts
+# worth committing, but without this they pile up in `git status` and eventually
+# hide a real untracked file.
+.node-xhr-sync-*
