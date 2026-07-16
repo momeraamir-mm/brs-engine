@@ -73,6 +73,46 @@ function compareVersion(a: number[], b: number[]): number {
     return 0;
 }
 
+/**
+ * BrightScript source with comments removed and string CONTENTS blanked, line structure intact.
+ *
+ * The Standards rules are text scans, and a scan that cannot tell code from prose flags the
+ * prose. An authored channel whose Task carried the comment `' never a callFunc across the
+ * thread boundary` was failed for "callFunc in a Task" — the file contained no callFunc at all.
+ * The rule flagged a comment documenting compliance with that very rule, which also punishes
+ * exactly the code most worth writing. Blanking string contents kills the same false positive
+ * for `x = "callFunc"`.
+ *
+ * Composed channels never surfaced this: their comments were written against these rules. It
+ * took a channel authored from scratch to hit it.
+ */
+function codeOnly(src: string): string {
+    return src.split("\n").map(stripLine).join("\n");
+}
+
+/** One line: drop a `'` or `REM` comment, blank string contents, keep everything else in place. */
+function stripLine(line: string): string {
+    let out = "";
+    let inStr = false;
+    for (const c of line) {
+        if (inStr) {
+            // A `""` escape closes then reopens; either way the content stays blanked.
+            out += c === '"' ? '"' : " ";
+            if (c === '"') inStr = false;
+            continue;
+        }
+        if (c === '"') {
+            inStr = true;
+            out += c;
+            continue;
+        }
+        if (c === "'") break; // comment runs to end of line
+        out += c;
+    }
+    const rem = /(?:^|:)\s*\bREM\b/i.exec(out);
+    return rem ? out.slice(0, rem.index) : out;
+}
+
 function parseManifest(text: string): Record<string, string> {
     const m: Record<string, string> = {};
     for (const line of text.split(/\r?\n/)) {
@@ -195,6 +235,12 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
     if (opts.standards) {
         const brsNames = names.filter((n) => /\.brs$/i.test(n));
         const xmlNames = names.filter((n) => /\.xml$/i.test(n));
+        // Scan CODE, not prose — see codeOnly(). The cert checks above deliberately keep using
+        // the raw text: they are presence checks ("does this channel mention roInput"), and
+        // tightening them would newly fail already-published channels — a separate call.
+        const code = new Map<string, string>();
+        for (const n of brsNames) code.set(n, codeOnly(strFromU8(files[n])));
+        const brsCode = brsNames.map((n) => code.get(n) ?? "").join("\n");
         // Which .brs run on a Task thread? A component whose xml extends a "*Task" base
         // contributes its <script uri> files (and its own sibling .brs).
         const taskBrs = new Set<string>();
@@ -210,13 +256,13 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
         const isTask = (n: string) => taskBrs.has(n.toLowerCase());
 
         // R1 — `option explicit` is not valid BrightScript (compile error on device).
-        if (/\boption\s+explicit\b/i.test(brsText))
+        if (/\boption\s+explicit\b/i.test(brsCode))
             add("error", "Standards", "`option explicit` found — not valid BrightScript; rely on typed signatures instead.");
 
         // R2 — no HTTP/file I/O outside a Task; R3 — never callFunc across threads.
         const IO = /\b(roUrlTransfer|ReadAsciiFile|WriteAsciiFile|MoveFile|DeleteFile|CopyFile|ListDir|roFileSystem)\b/;
         for (const n of brsNames) {
-            const txt = strFromU8(files[n]);
+            const txt = code.get(n) ?? "";
             const io = IO.exec(txt);
             if (io && !isTask(n))
                 add("error", "Standards", `HTTP/file I/O (${io[1]}) outside a Task in ${n} — move it into a Task component.`);
@@ -226,7 +272,7 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
 
         // R4 — typed signatures: a function/sub should declare an `as <type>` return (warning).
         let untyped = 0;
-        for (const line of brsText.split("\n")) {
+        for (const line of brsCode.split("\n")) {
             const m = /^\s*(?:function|sub)\s+(\w+)\s*\([^)]*\)\s*(.*)$/i.exec(line);
             if (m && !/\bas\s+\w/i.test(m[2])) {
                 untyped++;
@@ -248,8 +294,8 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
         if ((man["mm_media"] || "").toLowerCase() === "audio") {
             const hasVideoNode =
                 xmlNames.some((xn) => /<Video[\s/>]/i.test(strFromU8(files[xn]))) ||
-                /createObject\s*\(\s*"roSGNode"\s*,\s*"Video"\s*\)/i.test(brsText) ||
-                /createObject\s*\(\s*"roVideoPlayer"\s*\)/i.test(brsText);
+                /createObject\s*\(\s*"roSGNode"\s*,\s*"Video"\s*\)/i.test(brsCode) ||
+                /createObject\s*\(\s*"roVideoPlayer"\s*\)/i.test(brsCode);
             if (hasVideoNode)
                 add("error", "Standards", "Audio-only app (mm_media=audio) contains a Video node — a Video node suppresses the system screensaver (cert violation for audio-only playback); use an Audio node.");
         }
