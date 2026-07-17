@@ -61,7 +61,13 @@ const BrsDevice = brs.BrsDevice;
 
 // Variables
 let appFileName = "";
+// --screenshot capture state. The throttle keeps a TRAILING frame (see saveScreenshot): a
+// static SceneGraph scene stops emitting frames entirely, so the frame a naive throttle drops
+// is very often the FINAL one — and the file would then hold a stale frame forever.
+const SCREENSHOT_THROTTLE_MS = 250;
 let lastScreenshotMs = 0;
+let pendingScreenshot: { frame: ImageData; file: string } | null = null;
+let pendingScreenshotTimer: NodeJS.Timeout | null = null;
 let currentPayload: AppPayload;
 const MAX_TASKS = 10;
 const taskWorkers = new Map<number, Worker>();
@@ -699,21 +705,65 @@ function packageCallback(event: string, data: any) {
  * @param _ - Unused parameter
  */
 /**
+ * Writes a frame to a PNG file, unthrottled. Use saveScreenshot() instead.
+ * @param frame - The ImageData frame received from the engine
+ * @param file - Destination PNG path (from the --screenshot option)
+ */
+function writeScreenshot(frame: ImageData, file: string) {
+    try {
+        fs.writeFileSync(file, frameToPngBuffer(frame));
+    } catch (err: any) {
+        console.error(chalk.red(`[screenshot] write failed: ${err.message}`));
+    }
+}
+
+/**
  * Writes the latest rendered frame to a PNG file for headless visual capture.
- * Throttled to at most once per 250ms to avoid excessive disk I/O at render cadence.
+ *
+ * Throttled to at most once per SCREENSHOT_THROTTLE_MS to avoid excessive disk I/O at render
+ * cadence, but the throttle has a TRAILING edge: a frame arriving inside the window is held and
+ * written when the window closes, never dropped.
+ *
+ * That trailing edge is a correctness requirement, not an optimisation. This used to `return`
+ * on a throttled frame, and a SceneGraph scene that has settled emits NO further frames — so the
+ * dropped frame was routinely the FINAL one and the PNG kept whatever came ~250ms earlier, for as
+ * long as the scene stayed still. In practice that meant an app whose content arrives on a Task
+ * (the normal case) captured its LOADING screen: the "loading" frame won the write, the finished
+ * frame landed inside the window and was discarded, and the scene then went quiet forever. It
+ * presented as flaky rather than broken, because a frame that happened to land after the window
+ * was kept. Every headless consumer of --screenshot inherited that staleness, including the
+ * agent's visual gate, which reviews this file to decide whether a channel looks shippable.
+ *
  * @param frame - The ImageData frame received from the engine
  * @param file - Destination PNG path (from the --screenshot option)
  */
 function saveScreenshot(frame: ImageData, file: string) {
     const now = Date.now();
-    if (now - lastScreenshotMs < 250) {
+    const sinceLast = now - lastScreenshotMs;
+    if (sinceLast < SCREENSHOT_THROTTLE_MS) {
+        pendingScreenshot = { frame, file };
+        if (pendingScreenshotTimer === null) {
+            pendingScreenshotTimer = setTimeout(() => {
+                pendingScreenshotTimer = null;
+                flushScreenshot();
+            }, SCREENSHOT_THROTTLE_MS - sinceLast);
+            // Never hold the CLI open just to write a screenshot; finalizeRun flushes on exit.
+            pendingScreenshotTimer.unref?.();
+        }
         return;
     }
+    pendingScreenshot = null;
     lastScreenshotMs = now;
-    try {
-        fs.writeFileSync(file, frameToPngBuffer(frame));
-    } catch (err: any) {
-        console.error(chalk.red(`[screenshot] write failed: ${err.message}`));
+    writeScreenshot(frame, file);
+}
+
+/** Write any frame the throttle is holding. Called by the trailing timer and on app exit. */
+function flushScreenshot() {
+    const held = pendingScreenshot;
+    pendingScreenshot = null;
+    if (held) {
+        lastScreenshotMs = Date.now();
+        writeScreenshot(held.frame, held.file);
     }
 }
 
@@ -906,6 +956,13 @@ function renderFrame(frame: ImageData) {
  * @param exitReason - The AppExitReason reported by the engine worker.
  */
 function finalizeRun(exitReason: string) {
+    // The app's LAST frame is the one a headless capture usually wants, and it is exactly the
+    // one most likely to be sitting in the throttle when the app exits.
+    if (pendingScreenshotTimer !== null) {
+        clearTimeout(pendingScreenshotTimer);
+        pendingScreenshotTimer = null;
+    }
+    flushScreenshot();
     appWorker?.terminate();
     brsWorker?.terminate();
     for (const worker of taskWorkers.values()) {
