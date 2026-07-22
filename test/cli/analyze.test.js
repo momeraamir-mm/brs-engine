@@ -15,6 +15,42 @@ const brsCliPath = path.join(process.cwd(), "packages", "node", "bin", "brs.cli.
 // defeating recall would be worthless.
 const CALLFUNC_IN_TASK_MSG = "callFunc in a Task (components/WorkerTask.brs) crosses threads";
 
+// Regression coverage for the "Fonts" rule (src/cli/analyze.ts), which is NOT opt-in.
+//
+// Why it must exist at all: on REAL HARDWARE an unrecognised system-font name makes the Label
+// render NOTHING — silently, no crash, no fallback (device-verified 2026-07-22, Streaming Stick
+// 15.2.4, A/B probe). This simulator throws on the same markup instead, so the sim fails loudly
+// and the device fails silently: a channel with invisible text boots green and passes every
+// runtime gate that asks "did it boot". A static check is the only thing that catches it.
+//
+// The two fixtures are IDENTICAL apart from the font names, so the pair proves recall and
+// precision on the same shape — proving precision by defeating recall would be worthless.
+// The valid fixture deliberately carries three false-positive traps: a bogus font name in an
+// XML comment, another in a BrightScript comment, and a `<Font uri="...">` FILE reference
+// (which is not a system-font name and must not be checked).
+const BAD_XML_FONT = 'Unknown system font "font:NotARealFont" in components/FixtureScene.xml';
+const BAD_BRS_FONT = 'Unknown system font "font:AlsoNotReal" in components/FixtureScene.brs';
+
+describe("analyze: unknown system-font rule", () => {
+    it("stays SILENT on valid fonts, comments naming bogus fonts, and <Font uri> files", async () => {
+        const command = ["node", brsCliPath, "--analyze", "analyze-font-valid.zip"].join(" ");
+        const { stdout } = await exec(command, { cwd: path.join(__dirname, "resources") });
+        expect(stdout).not.toContain("Fonts:");
+        expect(stdout).toContain("0 error(s)");
+    }, 10000);
+
+    it("fires on an unknown font in an XML font= attribute AND a BRS .font assignment", async () => {
+        const command = ["node", brsCliPath, "--analyze", "analyze-font-bad.zip"].join(" ");
+        try {
+            await exec(command, { cwd: path.join(__dirname, "resources") });
+            throw new Error("expected brs-cli --analyze to exit non-zero (ERROR findings present)");
+        } catch (err) {
+            expect(err.stdout).toContain(BAD_XML_FONT);
+            expect(err.stdout).toContain(BAD_BRS_FONT);
+        }
+    }, 10000);
+});
+
 describe("analyze --standards: callFunc-in-Task rule precision", () => {
     it("does NOT fire on a comment merely describing the rule (no real callFunc)", async () => {
         let command = ["node", brsCliPath, "--analyze", "analyze-task-comment-only.zip", "--standards"].join(" ");

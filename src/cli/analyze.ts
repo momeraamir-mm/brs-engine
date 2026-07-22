@@ -90,6 +90,24 @@ function codeOnly(src: string): string {
     return src.split("\n").map(stripLine).join("\n");
 }
 
+/**
+ * One line with any `'` comment removed but STRING CONTENTS INTACT.
+ *
+ * The font rule needs the opposite of codeOnly(): it is looking for a string literal, so it
+ * cannot use a helper that blanks strings — but it still must not read a comment, or a line
+ * documenting the rule would trip it (the false-positive shape the callFunc rule was fixed for).
+ */
+function stripBrsComment(line: string): string {
+    let out = "";
+    let inStr = false;
+    for (const c of line) {
+        if (c === '"') inStr = !inStr;
+        if (c === "'" && !inStr) break; // comment runs to end of line
+        out += c;
+    }
+    return out;
+}
+
 /** One line: drop a `'` or `REM` comment, blank string contents, keep everything else in place. */
 function stripLine(line: string): string {
     let out = "";
@@ -225,6 +243,64 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
             add("info", "Versioning", `Version ${curVer.join(".")} > published ${prevVer.join(".")} — OK.`);
     } else {
         add("info", "Versioning", `Version ${curVer.join(".")} — pass --prev <published-version> to verify it was bumped vs the published build.`);
+    }
+
+    // --- Fonts: every `font="font:X"` must name a real system font -------------------------
+    //
+    // NOT opt-in, deliberately. This is not a style rule: on REAL HARDWARE an unrecognised
+    // system-font name makes the Label render NOTHING AT ALL — silently. No crash, no error, no
+    // fallback face. Device-verified 2026-07-22 by an A/B probe on a Streaming Stick (15.2.4):
+    // the same Label reads "Ag123" with `font:LargeBoldSystemFont` and is blank with
+    // `font:NotARealFont`, everything else on screen untouched.
+    //
+    // On THIS simulator the same markup throws instead (parseFont returns invalid and
+    // Label.renderLabel calls a method on it), so the sim fails loudly and the device fails
+    // silently. That divergence is why a static check has to exist: every runtime gate we own
+    // asks "did it boot", and on device a channel with invisible text boots perfectly.
+    //
+    // High precision by construction — the legal set is CLOSED and enumerable, so this cannot
+    // false-positive on valid code the way a fuzzy text scan can. Scoped narrowly to the two
+    // forms that actually take a system-font NAME: the `font=` attribute in XML and a
+    // `.font = "font:..."` assignment in BrightScript. A `<Font uri="...">` child is a font FILE
+    // reference and is NOT checked here (device testing showed an unknown uri there still
+    // renders, honouring `size` and falling back on the face).
+    const SYSTEM_FONTS = new Set([
+        "BadgeSystemFont",
+        "TinySystemFont", "TinyBoldSystemFont",
+        "SmallestSystemFont", "SmallestBoldSystemFont",
+        "SmallerSystemFont", "SmallerBoldSystemFont",
+        "SmallSystemFont", "SmallBoldSystemFont",
+        "MediumSystemFont", "MediumBoldSystemFont",
+        "LargeSystemFont", "LargeBoldSystemFont",
+        "ExtraLargeSystemFont", "ExtraLargeBoldSystemFont",
+        "LargestSystemFont",
+    ]);
+    const badFonts = new Map<string, string>(); // name -> first file it appeared in
+    const noteFont = (name: string, where: string) => {
+        if (!SYSTEM_FONTS.has(name) && !badFonts.has(name)) badFonts.set(name, where);
+    };
+    for (const n of names) {
+        if (/\.xml$/i.test(n)) {
+            // Strip XML comments first: a comment documenting the rule must not trip it (the
+            // same false-positive shape the callFunc rule was fixed for).
+            const xml = strFromU8(files[n]).replace(/<!--[\s\S]*?-->/g, "");
+            const re = /\bfont\s*=\s*"font:([^"]*)"/gi;
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(xml)) !== null) noteFont(m[1].trim(), n);
+        } else if (/\.brs$/i.test(n)) {
+            const src = strFromU8(files[n]);
+            for (const raw of src.split("\n")) {
+                const line = stripBrsComment(raw);
+                const re = /\.font\s*=\s*"font:([^"]*)"/gi;
+                let m: RegExpExecArray | null;
+                while ((m = re.exec(line)) !== null) noteFont(m[1].trim(), n);
+            }
+        }
+    }
+    for (const [name, where] of badFonts) {
+        add("error", "Fonts",
+            `Unknown system font "font:${name}" in ${where} — renders NOTHING on a real device ` +
+            `(silently) and throws in the simulator. Use one of: ${[...SYSTEM_FONTS].join(", ")}.`);
     }
 
     // --- House coding standards (opt-in via --standards; category "Standards") ---
