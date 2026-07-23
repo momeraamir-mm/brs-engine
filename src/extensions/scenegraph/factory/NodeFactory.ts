@@ -1025,12 +1025,21 @@ export function getBrsValueFromFieldType(type: string, value?: string, defaultVa
  */
 function parseFont(value: string, defaultValue?: BrsType): BrsType {
     let returnValue: BrsType = new Font();
-    if (
-        returnValue instanceof Font &&
-        value?.startsWith("font:") &&
-        !returnValue.setSystemFont(value.slice(5).toLowerCase())
-    ) {
-        returnValue = defaultValue ?? BrsInvalid.Instance;
+    if (returnValue instanceof Font && value?.startsWith("font:")) {
+        // setSystemFont mutates returnValue to the matched font and returns true; false means the
+        // name is not one of the system fonts.
+        if (!returnValue.setSystemFont(value.slice(5).toLowerCase())) {
+            // On a real Roku device an unknown font name renders the label's text as NOTHING,
+            // silently — no crash, no fallback. That silent failure is a common and invisible
+            // authoring mistake, so warn here where the bad name is still known. The renderer
+            // (Group.drawText/drawTextWrap) then draws no glyphs, matching the device instead of
+            // crashing. See factory/standards/roku-ui.md §3.3.
+            BrsDevice.stderr.write(
+                `warning,WARNING: Unknown font "${value}" — this label renders NO text on a real Roku device. ` +
+                    `Use a system font (e.g. font:MediumSystemFont) or a valid <Font> uri.`
+            );
+            returnValue = defaultValue ?? BrsInvalid.Instance;
+        }
     }
     return returnValue;
 }

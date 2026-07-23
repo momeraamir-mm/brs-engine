@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<component name="BadFontScene" extends="Scene">
+  <children>
+    <Label id="good" text="ok" font="font:MediumSystemFont" />
+    <Label id="bad" text="unknown font renders nothing on device" font="font:NotARealFont" />
+  </children>
+</component>

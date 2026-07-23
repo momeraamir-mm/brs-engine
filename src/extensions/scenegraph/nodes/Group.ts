@@ -299,6 +299,14 @@ export class Group extends Node {
         ellipsis: string = "...",
         index: number = 0
     ) {
+        // An unknown font name (e.g. font="font:NotARealFont") resolves to BrsInvalid at parse
+        // time, not a Font. A real Roku device renders NOTHING for such a label, silently; the
+        // simulator used to crash here (font.createDrawFont is not a function). Match the device
+        // by drawing no glyphs — the invalid name is warned once at parse time (parseFont). See
+        // factory/standards/roku-ui.md §3.3.
+        if (!isFont(font)) {
+            return { text: fullText, width: 0, height: 0, ellipsized: false };
+        }
         const drawFont = font.createDrawFont();
         if (!(drawFont instanceof RoFont)) {
             return { text: fullText, width: 0, height: 0, ellipsized: false };
@@ -362,6 +370,11 @@ export class Group extends Node {
         displayPartialLines: boolean = false,
         draw2D?: IfDraw2D
     ): MeasuredText {
+        // See drawText above: an unknown font name is BrsInvalid, not a Font. Match the device
+        // (render nothing) instead of crashing on font.createDrawFont.
+        if (!isFont(font)) {
+            return { text, width: rect.width, height: 0, ellipsized: false };
+        }
         const drawFont = font.createDrawFont();
         if (!(drawFont instanceof RoFont)) {
             return { text, width: rect.width, height: 0, ellipsized: false };

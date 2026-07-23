@@ -160,6 +160,27 @@ describe("cli", () => {
         ]);
     }, 10000);
 
+    it("Unknown font name does not crash the simulator", async () => {
+        // A <Label> with an unknown font name (e.g. font="font:NotARealFont") used to crash
+        // the simulator at scene construction (TypeError: font.createDrawFont is not a
+        // function), while a real Roku device renders the label as nothing and keeps running.
+        // parseFont now returns BrsInvalid and Group.drawText/drawTextWrap skip a non-Font,
+        // matching the device. exec() rejects on the crash exit code, so a regression fails
+        // this test outright. See factory/standards/roku-ui.md §3.3.
+        let command = ["node", brsCliPath, "-r scenegraph", "source/BadFont.brs", "-c 0"].join(" ");
+
+        let { stdout } = await exec(command, {
+            cwd: path.join(__dirname, "resources"),
+        });
+        expect(stdout.split("\n").map((line) => line.trimEnd())).toEqual([
+            "scene created",
+            "no crash",
+            "------ Finished 'BadFont.brs' execution [EXIT_USER_NAV] ------",
+            "",
+            "",
+        ]);
+    }, 10000);
+
     it("SceneGraph Node Alias Test", async () => {
         let command = ["node", brsCliPath, "-r multi-alias-app", "source/main.brs", "-c 0"].join(" ");
 
