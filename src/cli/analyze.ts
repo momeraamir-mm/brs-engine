@@ -362,19 +362,19 @@ export function analyze(zipPath: string, opts: AnalyzeOptions = {}): Finding[] {
         if (!implementsDeepLink)
             add("error", "Standards", "Deep-link handler incomplete — need Main(args) + roInput + contentId routing (cert-mandatory Direct-to-Play).");
 
-        // R6 — capability gate: an audio-only app must not contain a Video node (a Video
-        // node suppresses the system screensaver — a cert violation for audio-only
-        // playback). Keyed on the DECLARED capability `mm_media=audio` (a capability
-        // attribute, NOT an archetype): a real video app is unaffected, and an app that
-        // doesn't declare audio intent isn't checked for this rule.
-        if ((man["mm_media"] || "").toLowerCase() === "audio") {
-            const hasVideoNode =
-                xmlNames.some((xn) => /<Video[\s/>]/i.test(strFromU8(files[xn]))) ||
-                /createObject\s*\(\s*"roSGNode"\s*,\s*"Video"\s*\)/i.test(brsCode) ||
-                /createObject\s*\(\s*"roVideoPlayer"\s*\)/i.test(brsCode);
-            if (hasVideoNode)
-                add("error", "Standards", "Audio-only app (mm_media=audio) contains a Video node — a Video node suppresses the system screensaver (cert violation for audio-only playback); use an Audio node.");
-        }
+        // R6 — screensaver cert gate: a Video node suppresses Roku's system screensaver, which
+        // cert 4.5 forbids overriding. Detected from the ACTUAL node in the built channel — NOT
+        // from a self-declared `mm_media` label (our own invention, which could be absent or
+        // wrong, and which made this rule skip silently). Reading reality makes it always run and
+        // unspoofable. Emitted as a WARNING, not an error, because static analysis cannot tell a
+        // legitimate video-playback app (suppression-while-watching is expected) from an improper
+        // idle/ambient suppression — that legitimacy is a runtime/store-category judgment.
+        const hasVideoNode =
+            xmlNames.some((xn) => /<Video[\s/>]/i.test(strFromU8(files[xn]))) ||
+            /createObject\s*\(\s*"roSGNode"\s*,\s*"Video"\s*\)/i.test(brsCode) ||
+            /createObject\s*\(\s*"roVideoPlayer"\s*\)/i.test(brsCode);
+        if (hasVideoNode)
+            add("warning", "Standards", "Contains a Video node — a Video node suppresses Roku's system screensaver (cert 4.5 forbids overriding it). Permitted only while actively presenting video the user chose to watch; verify it is not left running during idle/ambient use (an audio-only or ambient app must use an Audio node instead).");
 
         // NOTE: "no >1 Hz hot field on the visual tree" is intentionally NOT linted — update
         // frequency isn't statically determinable (the device-validated reference uses

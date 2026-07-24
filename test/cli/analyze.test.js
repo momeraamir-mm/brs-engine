@@ -80,3 +80,31 @@ describe("analyze --standards: callFunc-in-Task rule precision", () => {
         }
     }, 10000);
 });
+
+// R6 — the screensaver/Video-node cert rule fires from the ACTUAL node, not a declared
+// `mm_media` label (removed as taxonomy). Both directions are asserted: silent on a channel with
+// no Video node, fires (as a warning) on any Video node. Both fixtures trip an unrelated deep-link
+// ERROR (exit 1, exec rejects), so only the Video-node message is asserted, on either path.
+const VIDEO_NODE_MSG = "Contains a Video node";
+
+describe("analyze --standards: Video-node screensaver rule (R6)", () => {
+    it("stays SILENT on a channel with no Video node", async () => {
+        const command = ["node", brsCliPath, "--analyze", "analyze-task-comment-only.zip", "--standards"].join(" ");
+        try {
+            const { stdout } = await exec(command, { cwd: path.join(__dirname, "resources") });
+            expect(stdout).not.toContain(VIDEO_NODE_MSG);
+        } catch (err) {
+            expect(err.stdout).not.toContain(VIDEO_NODE_MSG);
+        }
+    }, 10000);
+
+    it("fires (as a warning) on any Video node, regardless of a declared media label", async () => {
+        const command = ["node", brsCliPath, "--analyze", "analyze-video-node.zip", "--standards"].join(" ");
+        try {
+            const { stdout } = await exec(command, { cwd: path.join(__dirname, "resources") });
+            expect(stdout).toContain(VIDEO_NODE_MSG);
+        } catch (err) {
+            expect(err.stdout).toContain(VIDEO_NODE_MSG);
+        }
+    }, 10000);
+});
